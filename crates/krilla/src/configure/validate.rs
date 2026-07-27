@@ -179,10 +179,6 @@ impl Validators {
     /// Returns a filtered `Validators` containing only validators that prohibit the given error,
     /// or `None` if no validator prohibits it.
     pub fn prohibits(self, error: &ValidationError) -> Option<Self> {
-        if matches!(error, ValidationError::FontsNotEmbedded) {
-            return (!self.is_empty()).then_some(self);
-        }
-
         let a = self.a.filter(|v| v.prohibits(error));
         let ua = self.ua.filter(|v| v.prohibits(error));
 

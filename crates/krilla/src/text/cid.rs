@@ -7,6 +7,7 @@ use skrifa::outline::DrawSettings;
 use skrifa::prelude::LocationRef;
 use skrifa::raw::tables::cff::Cff;
 use skrifa::raw::{TableProvider, TopLevelTable};
+use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -114,7 +115,7 @@ pub(crate) struct CIDFont {
     /// The widths of the glyphs, _indexed by their CID_.
     widths: Vec<f32>,
     no_embed_fonts: bool,
-    identity_gids: FxHashMap<u16, ()>,
+    identity_gids: BTreeSet<u16>,
     is_empty: bool,
 }
 
@@ -131,7 +132,7 @@ impl CIDFont {
             widths,
             font,
             no_embed_fonts,
-            identity_gids: FxHashMap::default(),
+            identity_gids: BTreeSet::default(),
             is_empty: true,
         }
     }
@@ -154,7 +155,7 @@ impl CIDFont {
     pub(crate) fn get_cid(&self, glyph_id: GlyphId) -> Option<u16> {
         let gid = glyph_id.to_u32() as u16;
         if self.no_embed_fonts {
-            self.identity_gids.contains_key(&gid).then_some(gid)
+            self.identity_gids.contains(&gid).then_some(gid)
         } else {
             self.glyph_remapper.get(gid)
         }
@@ -167,8 +168,7 @@ impl CIDFont {
 
         let gid = u16::try_from(glyph_id.to_u32()).unwrap();
         if self.no_embed_fonts {
-            self.glyph_remapper.remap(gid);
-            self.identity_gids.insert(gid, ());
+            self.identity_gids.insert(gid);
             return gid;
         }
 
@@ -321,11 +321,9 @@ impl CIDFont {
 
         let mut width_writer = cid.widths();
         if no_embed_fonts {
-            let mut gids = self.identity_gids.keys().copied().collect::<Vec<_>>();
-            gids.sort();
-            for gid in gids {
-                if let Some(width) = self.font.advance_width(GlyphId::new(gid as u32)) {
-                    width_writer.same(gid, gid, to_pdf_units(width));
+            for gid in &self.identity_gids {
+                if let Some(width) = self.font.advance_width(GlyphId::new(*gid as u32)) {
+                    width_writer.same(*gid, *gid, to_pdf_units(width));
                 }
             }
         } else {
@@ -431,11 +429,9 @@ impl CIDFont {
             // For the .notdef glyph, it's fine if no mapping exists, since it is included
             // even if it was not referenced in the text.
             if no_embed_fonts {
-                let mut gids = self.identity_gids.keys().copied().collect::<Vec<_>>();
-                gids.sort();
-                for gid in gids {
-                    let entry = self.cmap_entries.get(&gid);
-                    write_cmap_entry(&self.font, entry, sc, &mut cmap, gid);
+                for gid in &self.identity_gids {
+                    let entry = self.cmap_entries.get(gid);
+                    write_cmap_entry(&self.font, entry, sc, &mut cmap, *gid);
                 }
             } else {
                 for g in 1..self.glyph_remapper.num_gids() {

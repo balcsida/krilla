@@ -25,15 +25,15 @@ use crate::{
     metadata_1, metadata_2, rect_to_path, red_fill, settings_1, settings_13, settings_15,
     settings_17, settings_19, settings_20, settings_23, settings_24, settings_32, settings_33,
     settings_7, settings_8, settings_9, stops_with_2_solid_1, validation_errors, youtube_link,
-    NOTO_SANS,
+    LATIN_MODERN_ROMAN, NOTO_SANS,
 };
 use crate::{Document, SerializeSettings};
 
-fn no_embed_text_document(settings: SerializeSettings) -> Document {
+fn no_embed_text_document(settings: SerializeSettings, font_data: krilla::Data) -> Document {
     let mut document = Document::new_with(settings);
     let mut page = document.start_page();
     let mut surface = page.surface();
-    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    let font = Font::new(font_data, 0).unwrap();
 
     surface.draw_text(
         Point::from_xy(0.0, 100.0),
@@ -51,10 +51,13 @@ fn no_embed_text_document(settings: SerializeSettings) -> Document {
 
 #[test]
 fn no_embed_fonts_preserves_font_identity() {
-    let document = no_embed_text_document(SerializeSettings {
-        no_embed_fonts: true,
-        ..settings_1()
-    });
+    let document = no_embed_text_document(
+        SerializeSettings {
+            no_embed_fonts: true,
+            ..settings_1()
+        },
+        NOTO_SANS.clone(),
+    );
     let pdf = document.finish().unwrap();
     let pdf = String::from_utf8_lossy(&pdf);
 
@@ -69,15 +72,34 @@ fn no_embed_fonts_preserves_font_identity() {
 }
 
 #[test]
+fn no_embed_fonts_omits_cff_font_file() {
+    let document = no_embed_text_document(
+        SerializeSettings {
+            no_embed_fonts: true,
+            ..settings_1()
+        },
+        LATIN_MODERN_ROMAN.clone(),
+    );
+    let pdf = document.finish().unwrap();
+    let pdf = String::from_utf8_lossy(&pdf);
+
+    assert!(pdf.contains("/Subtype /CIDFontType0"));
+    assert!(!pdf.contains("/FontFile3"));
+}
+
+#[test]
 fn no_embed_fonts_fails_validation() {
-    let document = no_embed_text_document(SerializeSettings {
-        no_embed_fonts: true,
-        configuration: ConfigurationBuilder::new()
-            .with_archival_validator(Archival::A2_B)
-            .finish()
-            .unwrap(),
-        ..settings_1()
-    });
+    let document = no_embed_text_document(
+        SerializeSettings {
+            no_embed_fonts: true,
+            configuration: ConfigurationBuilder::new()
+                .with_archival_validator(Archival::A2_B)
+                .finish()
+                .unwrap(),
+            ..settings_1()
+        },
+        NOTO_SANS.clone(),
+    );
 
     assert_eq!(
         validation_errors(document.finish()),
