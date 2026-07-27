@@ -140,6 +140,8 @@ pub enum ValidationError {
     /// This is currently forbidden in validated export because we cannot manually verify
     /// whether the file actually fulfills all the criteria for the export mode.
     EmbeddedPDF(Option<Location>),
+    /// Font programs were omitted although the selected standard requires them.
+    FontsNotEmbedded,
     /// A feature only available in a later PDF version was required.
     RequiresNewerPdfVersion(VersionedFeature, Option<Location>),
 }
@@ -177,6 +179,10 @@ impl Validators {
     /// Returns a filtered `Validators` containing only validators that prohibit the given error,
     /// or `None` if no validator prohibits it.
     pub fn prohibits(self, error: &ValidationError) -> Option<Self> {
+        if matches!(error, ValidationError::FontsNotEmbedded) {
+            return (!self.is_empty()).then_some(self);
+        }
+
         let a = self.a.filter(|v| v.prohibits(error));
         let ua = self.ua.filter(|v| v.prohibits(error));
 
@@ -531,6 +537,7 @@ pub enum Archival {
 impl Archival {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            (_, ValidationError::FontsNotEmbedded) => true,
             // Forbidden under all PDF/A-1 profiles.
             (
                 Self::A1_A | Self::A1_B,
@@ -1093,6 +1100,7 @@ pub enum Accessibility {
 impl Accessibility {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            (_, ValidationError::FontsNotEmbedded) => true,
             (
                 Self::UA1,
                 ValidationError::ContainsNotDefGlyph(_, _, _)

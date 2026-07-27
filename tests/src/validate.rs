@@ -2,7 +2,9 @@ use krilla::action::LinkAction;
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
 use krilla::color::{rgb, separation};
 use krilla::configure::validate::VersionedFeature;
-use krilla::configure::{Accessibility, ConfigurationBuilder, PdfVersion, ValidationError};
+use krilla::configure::{
+    Accessibility, Archival, ConfigurationBuilder, PdfVersion, ValidationError,
+};
 use krilla::embed::EmbedError;
 use krilla::error::KrillaError;
 use krilla::geom::{Point, Rect, Size};
@@ -26,6 +28,62 @@ use crate::{
     NOTO_SANS,
 };
 use crate::{Document, SerializeSettings};
+
+fn no_embed_text_document(settings: SerializeSettings) -> Document {
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "Hello world",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.finish();
+    page.finish();
+    document
+}
+
+#[test]
+fn no_embed_fonts_preserves_font_identity() {
+    let document = no_embed_text_document(SerializeSettings {
+        no_embed_fonts: true,
+        ..settings_1()
+    });
+    let pdf = document.finish().unwrap();
+    let pdf = String::from_utf8_lossy(&pdf);
+
+    assert!(!pdf.contains("/FontFile2"));
+    assert!(!pdf.contains("/FontFile3"));
+    assert!(pdf.contains("/ToUnicode"));
+    assert!(pdf.contains("/FontDescriptor"));
+    assert!(pdf.contains("/BaseFont /NotoSans-Regular"));
+    assert!(pdf.contains("/CIDToGIDMap /Identity"));
+    assert!(pdf.contains("/W [3 3 260 43 43"));
+    assert!(pdf.contains("<002B> <0048>"));
+}
+
+#[test]
+fn no_embed_fonts_fails_validation() {
+    let document = no_embed_text_document(SerializeSettings {
+        no_embed_fonts: true,
+        configuration: ConfigurationBuilder::new()
+            .with_archival_validator(Archival::A2_B)
+            .finish()
+            .unwrap(),
+        ..settings_1()
+    });
+
+    assert_eq!(
+        validation_errors(document.finish()),
+        vec![ValidationError::FontsNotEmbedded]
+    );
+}
 
 fn pdfa_document() -> Document {
     Document::new_with(settings_7())

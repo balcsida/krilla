@@ -113,12 +113,14 @@ pub(crate) struct CIDFont {
     cmap_entries: FxHashMap<u16, (String, Option<Location>)>,
     /// The widths of the glyphs, _indexed by their CID_.
     widths: Vec<f32>,
+    no_embed_fonts: bool,
+    identity_gids: FxHashMap<u16, ()>,
     is_empty: bool,
 }
 
 impl CIDFont {
     /// Create a new CID-keyed font.
-    pub(crate) fn new(font: Font) -> CIDFont {
+    pub(crate) fn new(font: Font, no_embed_fonts: bool) -> CIDFont {
         // Always include the .notdef glyph. Will also always be included by the subsetter in
         // the glyph remapper.
         let widths = vec![font.advance_width(GlyphId::new(0)).unwrap_or(0.0)];
@@ -128,6 +130,8 @@ impl CIDFont {
             cmap_entries: FxHashMap::default(),
             widths,
             font,
+            no_embed_fonts,
+            identity_gids: FxHashMap::default(),
             is_empty: true,
         }
     }
@@ -148,7 +152,12 @@ impl CIDFont {
 
     #[inline]
     pub(crate) fn get_cid(&self, glyph_id: GlyphId) -> Option<u16> {
-        self.glyph_remapper.get(glyph_id.to_u32() as u16)
+        let gid = glyph_id.to_u32() as u16;
+        if self.no_embed_fonts {
+            self.identity_gids.contains_key(&gid).then_some(gid)
+        } else {
+            self.glyph_remapper.get(gid)
+        }
     }
 
     /// Add a new glyph (if it has not already been added) and return its CID.
@@ -156,9 +165,14 @@ impl CIDFont {
     pub(crate) fn add_glyph(&mut self, glyph_id: GlyphId) -> Cid {
         self.is_empty = false;
 
-        let new_id = self
-            .glyph_remapper
-            .remap(u16::try_from(glyph_id.to_u32()).unwrap());
+        let gid = u16::try_from(glyph_id.to_u32()).unwrap();
+        if self.no_embed_fonts {
+            self.glyph_remapper.remap(gid);
+            self.identity_gids.insert(gid, ());
+            return gid;
+        }
+
+        let new_id = self.glyph_remapper.remap(gid);
 
         // This means that the glyph ID has been newly assigned, and thus we need to add its width.
         if new_id as usize >= self.widths.len() {
@@ -196,8 +210,17 @@ impl CIDFont {
         let cid_ref = sc.new_ref();
         let descriptor_ref = sc.new_ref();
         let cmap_ref = sc.new_ref();
-        let cid_set_ref = sc.new_ref();
-        let data_ref = sc.new_ref();
+        let no_embed_fonts = self.no_embed_fonts;
+        let cid_set_ref = if no_embed_fonts {
+            None
+        } else {
+            Some(sc.new_ref())
+        };
+        let data_ref = if no_embed_fonts {
+            None
+        } else {
+            Some(sc.new_ref())
+        };
 
         let glyph_remapper = &self.glyph_remapper;
 
@@ -234,12 +257,17 @@ impl CIDFont {
             sc.register_validation_error(ValidationError::RestrictedLicense(self.font.clone()));
         }
 
-        let (subsetted, global_bbox) = subset_font(self.font.clone(), glyph_remapper)?;
-        let num_glyphs = subsetted.num_glyphs();
-        let subsetted_data = subsetted.font_data().0;
+        let (subsetted, global_bbox) = if no_embed_fonts {
+            (None, self.font.bbox())
+        } else {
+            let (font, bbox) = subset_font(self.font.clone(), glyph_remapper)?;
+            (Some(font), bbox)
+        };
+        let num_glyphs = subsetted.as_ref().map(|font| font.num_glyphs());
+        let subsetted_data = subsetted.as_ref().map(|font| font.font_data().0);
 
-        let font_stream = {
-            let mut data = subsetted_data.as_ref().as_ref();
+        let font_stream = if let Some(data) = subsetted_data.as_ref() {
+            let mut data = data.as_ref().as_ref();
 
             // If we have a CFF font, only embed the standalone CFF program.
             let subsetted_ref = skrifa::FontRef::new(data).map_err(|_| {
@@ -250,10 +278,16 @@ impl CIDFont {
                 data = cff.as_bytes();
             }
 
-            FilterStreamBuilder::new_from_binary_data(data).finish(&sc.serialize_settings())
+            Some(FilterStreamBuilder::new_from_binary_data(data).finish(&sc.serialize_settings()))
+        } else {
+            None
         };
 
-        let base_font = base_font_name(&self.font, &self.glyph_remapper);
+        let base_font = if no_embed_fonts {
+            self.font.postscript_name().unwrap_or("unknown").to_string()
+        } else {
+            base_font_name(&self.font, &self.glyph_remapper)
+        };
         let base_font_type0 = if is_cff {
             format!("{base_font}-{IDENTITY_H}")
         } else {
@@ -285,15 +319,25 @@ impl CIDFont {
         // IN CID fonts, a upem value of 1000 is assumed for all fonts, so we need to convert.
         let to_pdf_units = |v: f32| v / self.font.units_per_em() * self.units_per_em();
 
-        let mut first = 0;
         let mut width_writer = cid.widths();
-        for (w, group) in self.widths.group_by_key(|&w| w) {
-            let end = first + group.len();
-            if w != 0.0 {
-                let last = end - 1;
-                width_writer.same(first as u16, last as u16, to_pdf_units(w));
+        if no_embed_fonts {
+            let mut gids = self.identity_gids.keys().copied().collect::<Vec<_>>();
+            gids.sort();
+            for gid in gids {
+                if let Some(width) = self.font.advance_width(GlyphId::new(gid as u32)) {
+                    width_writer.same(gid, gid, to_pdf_units(width));
+                }
             }
-            first = end;
+        } else {
+            let mut first = 0;
+            for (w, group) in self.widths.group_by_key(|&w| w) {
+                let end = first + group.len();
+                if w != 0.0 {
+                    let last = end - 1;
+                    width_writer.same(first as u16, last as u16, to_pdf_units(w));
+                }
+                first = end;
+            }
         }
 
         width_writer.finish();
@@ -301,7 +345,9 @@ impl CIDFont {
 
         // The only reason we write this in the first place is that PDF/A-1b requires
         // a CIDSet.
-        if !sc.serialize_settings().pdf_version().deprecates_cid_set() {
+        if let Some(num_glyphs) =
+            num_glyphs.filter(|_| !sc.serialize_settings().pdf_version().deprecates_cid_set())
+        {
             let cid_stream_data = {
                 // It's always guaranteed by the subsetter that CIDs start from 0 and are
                 // consecutive, so this encoding is very straight-forward.
@@ -317,7 +363,7 @@ impl CIDFont {
 
             let cid_stream = FilterStreamBuilder::new_from_binary_data(&cid_stream_data)
                 .finish(&sc.serialize_settings());
-            let mut cid_set = stream_chunk.stream(cid_set_ref, cid_stream.encoded_data());
+            let mut cid_set = stream_chunk.stream(cid_set_ref.unwrap(), cid_stream.encoded_data());
             cid_stream.write_filters(cid_set.deref_mut());
             cid_set.finish();
             cid_stream.finish();
@@ -363,14 +409,18 @@ impl CIDFont {
             .cap_height(cap_height)
             .stem_v(stem_v);
 
-        if !sc.serialize_settings().pdf_version().deprecates_cid_set() {
-            font_descriptor.cid_set(cid_set_ref);
+        if let Some(cid_set_ref) = cid_set_ref {
+            if !sc.serialize_settings().pdf_version().deprecates_cid_set() {
+                font_descriptor.cid_set(cid_set_ref);
+            }
         }
 
-        if is_cff {
-            font_descriptor.font_file3(data_ref);
-        } else {
-            font_descriptor.font_file2(data_ref);
+        if let Some(data_ref) = data_ref {
+            if is_cff {
+                font_descriptor.font_file3(data_ref);
+            } else {
+                font_descriptor.font_file2(data_ref);
+            }
         }
 
         font_descriptor.finish();
@@ -380,9 +430,18 @@ impl CIDFont {
 
             // For the .notdef glyph, it's fine if no mapping exists, since it is included
             // even if it was not referenced in the text.
-            for g in 1..self.glyph_remapper.num_gids() {
-                let entry = self.cmap_entries.get(&g);
-                write_cmap_entry(&self.font, entry, sc, &mut cmap, g);
+            if no_embed_fonts {
+                let mut gids = self.identity_gids.keys().copied().collect::<Vec<_>>();
+                gids.sort();
+                for gid in gids {
+                    let entry = self.cmap_entries.get(&gid);
+                    write_cmap_entry(&self.font, entry, sc, &mut cmap, gid);
+                }
+            } else {
+                for g in 1..self.glyph_remapper.num_gids() {
+                    let entry = self.cmap_entries.get(&g);
+                    write_cmap_entry(&self.font, entry, sc, &mut cmap, g);
+                }
             }
 
             cmap
@@ -397,13 +456,15 @@ impl CIDFont {
         cmap.writing_mode(WMode::Horizontal);
         cmap.finish();
 
-        let mut stream = stream_chunk.stream(data_ref, font_stream.encoded_data());
-        font_stream.write_filters(stream.deref_mut());
-        if is_cff {
-            stream.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
-        }
+        if let Some(font_stream) = font_stream {
+            let mut stream = stream_chunk.stream(data_ref.unwrap(), font_stream.encoded_data());
+            font_stream.write_filters(stream.deref_mut());
+            if is_cff {
+                stream.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
+            }
 
-        stream.finish();
+            stream.finish();
+        }
         chunk_container.streams.fonts.push(stream_chunk);
 
         Ok(())

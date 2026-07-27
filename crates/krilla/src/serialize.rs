@@ -116,6 +116,8 @@ pub struct SerializeSettings {
     /// just use the default function which doesn't render them at all. If you do want this, it
     /// is recommended that you use the function provided by the `krilla-svg` crate.
     pub render_svg_glyph_fn: RenderSvgGlyphFn,
+    /// Whether CID font programs should be omitted from the PDF.
+    pub no_embed_fonts: bool,
 }
 
 pub type RenderSvgGlyphFn = fn(&[u8], rgb::Color, GlyphId, (f32, f32), &mut Surface) -> Option<()>;
@@ -148,6 +150,7 @@ impl Default for SerializeSettings {
             configuration: Configuration::default(),
             enable_tagging: true,
             render_svg_glyph_fn: |_, _, _, _, _| None,
+            no_embed_fonts: false,
         }
     }
 }
@@ -438,7 +441,12 @@ impl SerializeContext {
         self.global_objects
             .font_map
             .entry(font.clone())
-            .or_insert_with(|| Rc::new(RefCell::new(FontContainer::new(font.clone()))))
+            .or_insert_with(|| {
+                Rc::new(RefCell::new(FontContainer::new(
+                    font.clone(),
+                    self.serialize_settings.no_embed_fonts,
+                )))
+            })
             .clone()
     }
 
@@ -471,6 +479,10 @@ impl SerializeContext {
         self.register_limits(pdf.limits());
 
         self.check_validator_limits();
+
+        if self.serialize_settings.no_embed_fonts {
+            self.register_validation_error(ValidationError::FontsNotEmbedded);
+        }
 
         if !self.validation_errors.is_empty() {
             // Deduplicate errors, while still preserving order.
